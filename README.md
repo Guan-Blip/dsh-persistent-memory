@@ -162,10 +162,8 @@ score        = semantic × 衰减权重 × 情绪系数
 ### 方式一：DSH 插件（推荐给普通用户）
 
 ```bash
-# 本地目录（开发用，改代码不用重装）
-dsh plugin --profile desktop add "link:F:\deeepseek"
 
-# 或 GitHub 仓库
+#  GitHub 仓库
 dsh plugin --profile desktop add "github:Guan-Blip/dsh-persistent-memory"
 ```
 
