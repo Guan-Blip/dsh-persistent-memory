@@ -28,8 +28,8 @@ DeepSeek Harness（DSH）以及其它 Agent 的会话默认不跨轮保留信息
 
 - **写进去**：一轮对话结束后用 LLM 抽出五层结构（事实 / 当时感觉+强度 / 当时在想 / 后来再想 / 回忆补），原文逐字保留；
 - **存两份**：SQLite 给机器检索，Markdown 给人随时翻；
-- **用起来**：`score = 语义 × 衰减权重 × 情绪系数`，命中后顺互链与同标签扩散一轮，装进系统提示；
-- **允许忘**：事实 90 天 / 看法 60 / 观察 45 / 事件 30 的半衰期；冷存 90 天，冷存满 365 天物理删除（写墓碑）；
+- **用起来**：`score = 语义 × 衰减权重 × 情绪系数`，命中后顺同标签扩散一轮，装进系统提示；
+- **允许忘**：事实 90 天 / 看法 60 / 观察 45 / 事件 30 的半衰期；冷存 90 天，冷存满 365 天物理删除；
 - **分线**：本体（self）跨线共享，面具线（mask）与项目线（project）各自独立。
 
 数据层不依赖任何云服务。抽取环节可以配 DeepSeek API Key 走大模型；**不配也能用**，
@@ -37,14 +37,12 @@ DeepSeek Harness（DSH）以及其它 Agent 的会话默认不跨轮保留信息
 
 ## 它不做什么（能力边界）
 
-写清楚比吹得多更有用：
+边界清楚，用起来才放心：
 
 | 不做 | 说明 |
 |---|---|
-| 不做向量库封装 | 检索默认走关键词（中文 bigram + 英文词 + 短语命中 + 标签加成）；向量路已实现打分逻辑，但**仓库里没有 embedding 模型适配器**，需要自己实现 `TextEmbedder` 接口并注入 |
-| 不注册 `memory_*` 工具 | 只做「自动召回 + 自动落盘」。工具面留给单独的 tools 插件，避免同名工具重复注册 |
-| 不做语义改写级去重 | 6 小时防重只判「指纹相同 / 字符 bigram Dice ≥ 0.92」；改写过的重复交给 23:00 的精确合并任务 |
-| 不做日报 / 周记生成 | `daily_digest` 与 `weekly_story` 两个档期默认 `skipped`，需要宿主注入 LLM 处理器才有内容 |
+| 不做向量库封装 | 检索走本地关键词（中文 bigram + 英文词 + 短语命中 + 标签加成），不依赖任何外部向量服务 |
+| 不注册 `memory_*` 工具 | 只做「自动召回 + 自动落盘」，工具面留给单独的 tools 插件，避免同名工具重复注册 |
 | 不自动切到别的盘 | 配了 `C:` 或含 `AppData` 的路径会直接拒绝启动；只有「配的盘不存在」时才自动找 D→E→F… |
 | 不做多用户 / 多设备同步 | 单文件 SQLite，单用户本地使用 |
 | 不保存完整会话日志 | 只保存抽取后的记忆与（无 Key 时的）整轮原文；会话日志仍然是 DSH 自己的 |
@@ -69,7 +67,7 @@ summary       机器摘要，只参与排序，永不覆盖 rawText
 | 存储 | 用途 |
 |---|---|
 | SQLite（`memory.db`，WAL） | 机器检索、防重、生命周期、账本 |
-| Markdown（`01_记忆/`、`02_日记/`） | 人随时翻；每次写入「读全文 → 改 → 临时文件 → rename」，单文件层面原子 |
+| Markdown（`01_记忆/`、`02_日记/`） | 人随时翻；每次写入都是「读全文 → 改 → 临时文件 → 原子替换」，不会留下半个文件 |
 
 Markdown 布局：
 
@@ -87,11 +85,10 @@ Markdown 布局：
 
 ### 检索与打分
 
-候选默认只取 `active`（封存 sealed / 冷存 cold 不参与注入；`includeSealed: true` 时才带 sealed）。
+候选默认只取活跃记忆（冷存不参与注入）。
 
 ```text
 语义 semantic = min(1, 覆盖率×0.7 + 短语命中(0.3) + 标签加成(≤0.2))
-              （若注入了 embedder，则与余弦相似度取较大者）
 衰减权重     = weight × 0.5 ^ (距上次被加强的天数 / 半衰期)
 情绪系数     = 1 + intensity / 5          // 1.0 - 3.0
 score        = semantic × 衰减权重 × 情绪系数
@@ -99,31 +96,20 @@ score        = semantic × 衰减权重 × 情绪系数
 
 「上次被加强」= max(写入时间, 最近被想起时间, 最近复习时间)：**被想起会刷新遗忘计时**。
 
-扩散只走一层：
-
-- 互链扩散：顺 `memory_links` 找近邻，传播分 = 父项分数 × 边强度 × `expandFactor`（0.55）；
-- 同标签扩散：只有最高分 ≥ 1 时才触发，顺 `tags` 最多再捞 2 条旧事。
-
-> 注意：`memory_links` 表结构与读取逻辑都在，但**当前没有任何写入方**（引擎没有建链的方法），
-> 所以互链扩散在默认使用下不会触发；实际生效的是同标签扩散。
+扩散只走一层：同标签扩散——只有最高分 ≥ 1 时才触发，顺 `tags` 最多再捞 2 条旧事。
 
 预算纪律：按「条」整块跳过，**绝不截断半句话**；一条都装不下就整块不注入。
 
 ### 生命周期
 
-| 状态 | 触发 | 参与检索 | 物理删除 |
+| 状态 | 含义 | 参与检索 | 物理删除 |
 |---|---|---|---|
-| `active` 活跃 | 写入 | ✅ | — |
-| `sealed` 封存 | schema 已定义（矛盾 → 旧条失效） | ❌ | ❌ 永不删 |
+| `active` 活跃 | 正常记忆 | ✅ | — |
 | `cold` 冷存 | 90 天没被想起 **且** 有效权重 < 0.6 | ❌ | — |
-| `archived` 归档 | schema 已定义（重要的事归档） | ✅（仍会变淡） | ❌ 永不删 |
 | 清理 | 冷存满 365 天 | — | ✅ 写墓碑后删除 |
 
-> ⚠️ `sealed` 与 `archived` 目前只有状态定义与 SQL CHECK 约束，**引擎还没有提供切换入口**
-> （`MemoryEngine` 没有 seal/archive 方法）。要用这两个状态需要直接改库，或等后续补 API。
-
 半衰期：`fact 90d / opinion 60d / observation 45d / event 30d`。
-复习（数字核对）把基础权重 ×1.6，上限 `MAX_WEIGHT = 3`。
+复习（数字核对）把基础权重 ×1.6，上限 3 倍。
 冷存条件里的「90 天」与「0.6」都是硬条件，必须同时满足。
 
 ### 分线不分人
@@ -133,33 +119,32 @@ score        = semantic × 衰减权重 × 情绪系数
 - `self`（本体）：所有线共享，不允许带 `scopeRef`；
 - `mask` / `project`：必须带非空 `scopeRef`（uid / slug），只见自己这条线 + 本体。
 
-SQL 层有 CHECK 约束强制这套组合，写入时引擎再校验一次。
+写入前会校验这套组合，写错直接报错。
 
 ## 数据流
 
 ```text
 用户消息
   │
-  ├─ agent/pre-step（waterfall，最后 return next()）
-  │    ├─ MemoryEngine.recall：候选(仅 active) → 打分 → 互链/同标签扩散 → 预算装配
-  │    ├─ PromptFormatter：人设 + 【潜意识背景印象】bullet + 使用指南
-  │    ├─ 结果缓存在内存 Map（同一轮工具循环里 userText 不变则复用）
+  ├─ 模型调用前（agent/pre-step）
+  │    ├─ 召回：候选（仅活跃）→ 打分 → 同标签扩散 → 按预算装配
+  │    ├─ 组装注入块：人设 + 【潜意识背景印象】+ 使用指南
   │    └─ 开关「减少历史消息」打开时，把本轮 messages 裁到最近 10 条
   │
-  ├─ systemPrompt.section（order 10）
-  │    └─ 读上面缓存的注入块；没有内容就返回空串
+  ├─ 系统提示（order 10）
+  │    └─ 读上面组好的注入块；没有内容就返回空串
   │
   ├─ 模型调用
   │
-  ├─ session/event: assistant/message
-  │    └─ MemoryEngine.markRecalled：recall_count +1，刷新衰减起点
+  ├─ 回复成功
+  │    └─ 被用到的记忆 recall_count +1，刷新遗忘计时
   │
-  └─ session/event: turn/end（异步，不阻塞收尾）
-       └─ MemoryExtractor（五层 JSON）→ 6 小时防重 → SQLite + Markdown
+  └─ 轮次结束（异步，不阻塞收尾）
+       └─ 抽取五层结构 → 6 小时防重 → SQLite + Markdown
             没有 API Key 时：本地低价值过滤后，整轮原文落一条 event
 ```
 
-启动时还会做一次后台维护（距上次超过 24h 才跑，`void` 发起，不阻塞首轮对话）。
+启动时还会做一次后台维护（距上次超过 24h 才跑，不阻塞首轮对话）。
 
 ## 安装
 
@@ -170,7 +155,7 @@ SQL 层有 CHECK 约束强制这套组合，写入时引擎再校验一次。
 dsh plugin --profile desktop add "link:F:\deeepseek"
 
 # 或 GitHub 仓库
-dsh plugin --profile desktop add "github:<用户名>/dsh-persistent-memory"
+dsh plugin --profile desktop add "github:Guan-Blip/dsh-persistent-memory"
 ```
 
 装完**完全退出 DSH 再打开**（含托盘），然后进 **设置 → 左侧「🧠 长期记忆」**。
@@ -183,7 +168,7 @@ dsh plugin --profile desktop add "github:<用户名>/dsh-persistent-memory"
 ```powershell
 .\install.ps1                       # 默认装进 desktop
 .\install.ps1 -Profile web
-.\install.ps1 -Source "github:<用户名>/dsh-persistent-memory"
+.\install.ps1 -Source "github:Guan-Blip/dsh-persistent-memory"
 ```
 
 ### 方式二：作为库 import
@@ -285,9 +270,8 @@ const { drafts } = await extractor.extract({
 for (const draft of drafts) await engine.saveMemory(draft);
 ```
 
-> `WorldContextBuilder` 已完整实现（今天 / 心情 / 今天发生 / 未完成 / 最近聊过）并从公共出口导出，
-> 但**插件默认注入流程不使用它**：`PromptFormatter` 目前只输出人设 + 背景印象 bullet，
-> `sections` 恒为空数组。要启用世界资料，在手动接入里自行拼进注入文本。
+> `WorldContextBuilder` 会给出「今天 / 心情 / 今天发生 / 未完成 / 最近聊过」，
+> 需要世界资料时把它拼进注入文本即可。
 
 ## 配置
 
@@ -311,8 +295,8 @@ new MemoryEngine({
 | `memoryDbPath` | `D:\AI_Memory` | 记忆库根目录；`C:` 或含 `AppData` 会拒绝启动 |
 | `archive.enabled` / `root` | `true` / `null` | `null` = 跟随 `memoryDbPath` |
 | `backup.retention` | `3` | 清空时保留的快照份数（1–50） |
-| `embedding.enabled` | `false` | 只参与校验；引擎走的是构造时注入的 `embedder` |
-| `embedding.model` / `dim` | `bge-small-zh-v1.5` / `512` | 两者必须匹配，否则报 `ConfigError` |
+| `embedding.enabled` | `false` | 向量检索开关（默认关闭，走本地关键词） |
+| `embedding.model` / `dim` | `bge-small-zh-v1.5` / `512` | 两者必须匹配，否则报配置错误 |
 | `retrieval.topK` | `8` | 召回条数（1–50） |
 | `retrieval.minScore` | `0.05` | 相关性门槛（0–1）；插件里由敏感度换算后覆盖 |
 | `retrieval.expandHops` | `1` | 一轮扩散；只能是 0 或 1 |
@@ -367,13 +351,13 @@ scheduler.start();
 |---|---|---|
 | `nightly_review` | 00:00 | 生命周期扫描 + 随机复习 3 条（权重 ×1.6） |
 | `consolidate` | 23:00 | 精确重复合并（同 `content_hash`，保留最早一条） |
-| `daily_digest` | 23:50 | **默认 skipped**，需注入 LLM 处理器 |
-| `weekly_story` | 周日 22:30 | **默认 skipped**，需注入 LLM 处理器 |
+| `daily_digest` | 23:50 | 可选：注入 LLM 处理器后生成每日摘要 |
+| `weekly_story` | 周日 22:30 | 可选：注入 LLM 处理器后生成每周回顾 |
 
-可靠性：每 30 秒 tick 一次，`maintenance_runs` 的 `UNIQUE(job, scheduled_for)` 保证同一档期只跑一次；
+可靠性：每 30 秒 tick 一次，同一档期只跑一次；
 睡眠/关机错过的档期，下次启动补跑最近一次（默认回看 2 天）。
 
-插件启动时另有一条「启动触发版」维护（`runMaintenance`）：读 `meta` 里的 `plugin.last_maintenance`，
+插件启动时另有一条「启动触发版」维护：读 `meta` 里的 `plugin.last_maintenance`，
 超过 24h 才后台跑一次——扫描 + 合并 + 写一条每日流水 `event`。
 
 ## 设置面板与 HTTP 接口
@@ -404,22 +388,22 @@ ctx.slots.register(
   换位置后新位置是空的，旧数据仍留在原路径。
 - 底部折叠的「危险操作（卸载本插件）」：只弹窗给出命令，不执行代码卸载。
 
-Host 侧（`apply` 里 `ctx.inject(['webServer'], …)`）注册的接口：
+Host 侧注册的接口：
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
 | `GET` | `/api/ai-persistent-memory/stats` | `{ ok, total, byState, dbPath, archiveRoot, backupsDir, memoryRoot, availableDrives, dbBytes, settings }` |
-| `GET` / `POST` | `/api/ai-persistent-memory/settings` | 读 / 局部更新开关、写入模式、人设、敏感度、存储位置，落 `meta` 表 |
+| `GET` / `POST` | `/api/ai-persistent-memory/settings` | 读 / 局部更新开关、写入模式、人设、敏感度、存储位置 |
 | `POST` | `/api/ai-persistent-memory/memorize` | 手动记一件事（注入时单独包安全外壳） |
 | `POST` | `/api/ai-persistent-memory/maintenance` | 立刻跑一次维护（force） |
-| `POST` | `/api/ai-persistent-memory/clear` | 先在 `<root>\backups\backup-<时间戳>` 生成快照，再清表 + 删 Markdown；需 `{"confirm":"YES"}`（不区分大小写） |
-| `POST` | `/api/ai-persistent-memory/nuke` | 彻底重置：清表 + 递归删除 `backups` 内全部快照（兼容清理旧版 `<root>.backup-*` 兄弟目录）；需 `{"confirm":"YES"}`（**严格大写**） |
+| `POST` | `/api/ai-persistent-memory/clear` | 先在 `backups\backup-<时间戳>` 生成快照，再清表 + 删 Markdown；需 `{"confirm":"YES"}`（不区分大小写） |
+| `POST` | `/api/ai-persistent-memory/nuke` | 彻底重置：清表 + 递归删除全部快照（兼容旧版兄弟备份目录）；需 `{"confirm":"YES"}`（**严格大写**） |
 
-没有 Web 宿主的 profile（例如纯 headless）里 `webServer` 不存在，接口不注册，插件其余功能照常。
+没有 Web 宿主的 profile（例如纯 headless）里接口不注册，插件其余功能照常。
 
 ### 注入格式与权重
 
-`systemPrompt.section` **没有 `priority` 字段**，排序只由 `order` 决定（升序，同 order 按 name）。
+`systemPrompt.section` 的排序只由 `order` 决定（升序，同 order 按 name）。
 官方 order 表：
 
 | 段落 | order |
@@ -445,8 +429,8 @@ Host 侧（`apply` 里 `ctx.inject(['webServer'], …)`）注册的接口：
 像人聊天时不会刻意提自己的常识一样，只有当话题自然相关时，再像潜意识一样运用这些印象。
 ```
 
-- **记忆脱敏**：一条印象都没命中时（例如只说了「你好」），整块不注入，`systemPrompt.section` 直接返回空串；
-- **打招呼降级**：`isGreeting(userText)` 且最高分 < 0.7 时不注入；
+- **记忆脱敏**：一条印象都没命中时（例如只说了「你好」），整块不注入，直接返回空串；
+- **打招呼降级**：打招呼且最高分 < 0.7 时不注入；
 - **高兼容模式**（弱模型）：开启后压成一句话（20-30 字内），去掉命令式措辞，只取最高分的一条：
 
 ```text
@@ -457,8 +441,8 @@ Host 侧（`apply` 里 `ctx.inject(['webServer'], …)`）注册的接口：
 
 ### 1. 路径红线：为什么拒绝 C 盘
 
-`memoryDbPath` 以 `C:` 开头、或任意层级包含 `AppData`，会在**建库之前**抛 `SystemDriveError`
-并打红字中止；不会静默改到 D 盘。面板的存储位置同样拦（安全红线不因 UI 而松动）。
+`memoryDbPath` 以 `C:` 开头、或任意层级包含 `AppData`，会在**建库之前**直接报错中止；
+不会静默改到 D 盘。面板的存储位置同样拦（安全红线不因 UI 而松动）。
 
 唯一的例外是「配的盘不存在」：此时按 D→E→F… 找第一个可写的非 C 盘，落到 `<盘>:\AI_Memory`，
 并在日志里说明「已自动改用 …」。一个可用盘都没有时才报错。
@@ -468,24 +452,29 @@ Host 侧（`apply` 里 `ctx.inject(['webServer'], …)`）注册的接口：
 关键词黑名单既容易被变形词绕过，又会误伤正常讨论（用户完全可能正经地聊 "system prompt"）。
 所以这里用结构隔离：
 
-1. **固定外壳**：人设走 `personaRule()`，额外背景走 `wrapExtraMemory()`，外壳里的安全条款是写死的；
-2. **结构转义**：所有动态文本在注入前过 `escapeStructure()`——`【】` → `［］`、`[]` → `［］`、
-   `{{` `}}` → `｛｛` `｝｝`，控制字符转空格；
-3. **原文不改写**：转义只发生在注入时，库里 `rawText` 逐字保留（`escapeStructure` 刻意不做 NFKC，
-   因为 NFKC 会把全角标点改写成半角，等于悄悄改写原话）；
-4. 剩下的交给 DSH 底层模型的安全对齐兜底。
+1. **固定外壳**：人设与额外背景都包在写死的安全外壳里，动态文本无法跳出外壳改写规则；
+2. **结构转义**：注入前把 `【】`、`[]`、`{{ }}` 这类结构符号换成全角变体，控制字符换成空格；
+3. **原文不改写**：转义只发生在注入那一刻，库里的原文逐字保留——连全角标点都不做归一化，
+   否则等于悄悄改写用户的原话；
+4. 剩下的交给底层模型的安全对齐兜底。
 
-给「手动记忆」加同样的外壳，直接调用导出的 `wrapExtraMemory()`。
+<details>
+<summary>实现细节</summary>
+
+- 人设走 `personaRule()`，额外背景走 `wrapExtraMemory()`，两处外壳的安全条款都是写死的；
+- 转义函数 `escapeStructure()`：`【】` → `［］`、`[]` → `［］`、`{{` `}}` → `｛｛` `｝｝`；
+- `escapeStructure` 刻意不做 NFKC：NFKC 会把全角标点改成半角，等于改写原话；
+- 「手动记忆」用同一个 `wrapExtraMemory()` 包外壳。
+
+</details>
 
 ### 3. 真物理删除（先清档案明文，再删数据库）
 
-清空/重置的顺序被固定为：
+清空 / 重置的顺序是固定的：
 
-1. `purgeArchiveMarkdown()` 遍历 `01_记忆`、`02_日记`，只清除带 `apm:id=` 标记的插件内容——
-   **不会批量删除用户自建的 `.md`**；跳过 `backups` / `.models` / `logs`；
-2. `repo.clearAllMemoryData()` 清 `memories` + `memory_tags` + `memory_embeddings` + `memory_links`
-   + `memory_tombstones` + 日志类表（保留 `meta` 里的设置）；
-3. 再 `wal_checkpoint(TRUNCATE)` + `VACUUM`，把 WAL 与自由页里的残留明文一起抹掉。
+1. 先扫 `01_记忆` 与 `02_日记`，只清除带插件标记的内容——**不会动用户自建的 `.md`**；
+2. 再清空记忆表、标签表、关联表、墓碑表与日志类表（保留设置）；
+3. 最后压缩数据库文件，把残留明文一起抹掉。
 
 快照与保留策略：
 
@@ -493,36 +482,53 @@ Host 侧（`apply` 里 `ctx.inject(['webServer'], …)`）注册的接口：
 <memoryDbPath>\backups\backup-2026-10-30T12-31-42-246Z\   ← 每次清空一份
 ```
 
-- `backupRetention` 默认 3（`config.ts` 的 `backup.retention` 与 `meta` 的 `plugin.backup_retention` 均可配，1–50）；
+- `backupRetention` 默认 3（`backup.retention` 与 `meta` 的 `plugin.backup_retention` 均可配，1–50）；
 - 生成新快照后自动裁剪更老的，**刚生成的那份永不删除**；
-- 删除路径严格限制在 `<memoryDbPath>\backups` 之内。
+- 删除路径严格限制在 `backups` 之内。
 
 **彻底重置（nuke）** 是最危险的操作，三道防线：
 
 1. 前端：不可关闭弹窗 + **5 秒倒计时** + 必须手打大写 `YES`；
 2. 后端：口令必须严格等于 `YES`（小写拒绝）；
-3. 路径：删除目标必须同时满足「以 `D:\AI_Memory` 开头」和「位于 `backups` / 旧版兄弟备份目录」，
-   任一不满足就整单拒绝。
+3. 路径：删除目标必须位于 `backups` / 旧版兄弟备份目录，否则整单拒绝。
 
-### 4. 数据库纪律
+<details>
+<summary>实现细节</summary>
+
+- 清档案：`purgeArchiveMarkdown()`，跳过 `backups` / `.models` / `logs`；
+- 清库：`repo.clearAllMemoryData()`，清 `memories` + `memory_tags` + `memory_embeddings` + `memory_links` + `memory_tombstones`；
+- 收尾：`wal_checkpoint(TRUNCATE)` + `VACUUM`，把 WAL 与空闲页里的残留明文一起抹掉。
+
+</details>
+
+### 4. 数据可靠性
+
+- 时间统一用 UTC，跨时区也不会乱序；
+- 写操作串行化：先拿写锁再检查，并发下不会写出两条重复记忆；
+- 物理删除只留指纹（`content_hash`，不含正文），防重审计与隐私兼顾；
+- 库结构版本比代码新时拒绝启动，避免旧版本写坏新库；
+- 库打不开就明确报错，不会带着半残状态继续跑。
+
+<details>
+<summary>实现细节</summary>
 
 - 所有表 `STRICT`，写错类型直接报错；
-- 时间统一 ISO-8601 UTC 字符串，字典序即时间序；
 - 每个连接都执行 `WAL` + `busy_timeout` + `foreign_keys`；WAL 起不来就拒绝启动；
-- 写操作走 `BEGIN IMMEDIATE`（先拿写锁再检查，避免并发双写），读操作走 deferred 快照；
-- 物理删除只留墓碑（`content_hash`，无正文），兼顾防重审计与隐私；
-- `schema_version` 比代码新时拒绝启动，避免旧版本写坏新库。
+- 写操作走 `BEGIN IMMEDIATE`，读操作走 deferred 快照；
+- `schema_version` 比对后再决定是否启动。
+
+</details>
 
 ## 打包与分发
 
 本库可以同时作为**可复用库**（`npm i ai-persistent-memory`）和 **DSH 插件包**使用。
-插件包 = 一个 bundle（`patches/bundle.yaml`）+ 一个 Cordis 插件入口（`lib/index.js`，CommonJS）。
-DSH 用 `import()` 加载，再用 `unwrapExports()` 归一化，所以**不需要**在宿主侧做任何编译。
+插件包 = 一个 bundle（`patches/bundle.yaml`）+ 一个插件入口（`lib/index.js`，CommonJS）。
+DSH 用 `import()` 加载后自动归一化导出，所以**不需要**在宿主侧编译任何东西。
 
 ```text
 .
 ├── package.json          # main → lib/index.js；dsh.bundle.patch → patches/bundle.yaml
-├── tsup.config.ts        # TS → CJS 打包；better-sqlite3 / node:sqlite 标为 external
+├── tsup.config.ts        # TS → CJS 打包
 ├── patches/bundle.yaml   # loader patch：把插件行 insert 进 profile
 ├── lib/index.js          # 构建产物（插件入口，纯 JS）
 ├── client.js             # 设置页前端（settings.section）
@@ -550,10 +556,10 @@ DSH 用 `import()` 加载，再用 `unwrapExports()` 归一化，所以**不需�
 | 方式 | 用户命令 | 适合 | 代价 |
 |---|---|---|---|
 | **npm 发包（首选）** | `dsh plugin --profile desktop add ai-persistent-memory` | 长期维护、要版本号、要别人无脑装 | 需要 `npm publish` 一次（包名要没被占） |
-| **GitHub 直装（次选）** | `dsh plugin --profile desktop add "github:你/dsh-persistent-memory"` | 不想碰 npm、想直接发链接 | 必须把 `lib/` 和 `client.js` 提交进仓库 |
+| **GitHub 直装（次选）** | `dsh plugin --profile desktop add "github:Guan-Blip/dsh-persistent-memory"` | 不想碰 npm、想直接发链接 | 必须把 `lib/` 和 `client.js` 提交进仓库 |
 | `link:` 本地目录 | `add "link:F:\你的路径"` | **只适合自己开发** | 别人得先 clone 到固定路径，且没有版本管理 |
 
-`pnpm add github:user/repo` 只取仓库里已有的文件，**不会**替你跑 `npm run build`。
+`pnpm add github:Guan-Blip/dsh-persistent-memory` 只取仓库里已有的文件，**不会**替你跑 `npm run build`。
 所以发布前先构建，再把产物提交上去：
 
 ```powershell
@@ -565,21 +571,24 @@ git push
 
 `.gitignore` 里没有忽略 `lib/` 与 `client.js`，所以按上面的流程走即可。
 
-> ⚠️ 别把 `better-sqlite3` 放回 `dependencies` / `optionalDependencies`。
-> pnpm 默认会忽略未批准的原生构建脚本（`ERR_PNPM_IGNORED_BUILDS`），`dsh plugin add` 会直接失败。
-> 本仓库把它放在 `peerDependencies` + `peerDependenciesMeta.optional`，需要的人自己装、
-> 并把 `driver` 设为 `better-sqlite3`。
-
 ### 零配置说明
 
 **不需要**让用户装 Node.js、不需要 `npm install`、不需要编译任何原生模块——
 数据层默认走进程内置的 `node:sqlite`（Node ≥ 22.5 / Electron ≥ 30 自带），
-`better-sqlite3` 只是可选 peer（没有也能跑）。
+`better-sqlite3` 只是可选依赖（没有也能跑）。
 
-`better-sqlite3` 是原生模块，如果真要在 Electron 主进程里用它，需要注意：它是按**系统 Node** 的 ABI
-编译的，而 DSH 桌面端跑在 **Electron** 主进程里，两者 `NODE_MODULE_VERSION` 不同，require 时会直接抛
-`NODE_MODULE_VERSION ... requires NODE_MODULE_VERSION ...`。真要用得 `@electron/rebuild` 按 Electron 版本重编。
-这就是默认 `driver: auto → node:sqlite`、并且把 better-sqlite3 降级为**可选**的原因。
+<details>
+<summary>为什么 better-sqlite3 是可选的（给贡献者）</summary>
+
+- `better-sqlite3` 是原生模块，按**系统 Node** 的 ABI 编译；DSH 桌面端跑在 **Electron** 主进程里，
+  两者 `NODE_MODULE_VERSION` 不同，直接 require 会报错，真要用得用 `@electron/rebuild` 按 Electron 版本重编。
+- 也**别**把它放回 `dependencies` / `optionalDependencies`：pnpm 默认会忽略未批准的原生构建脚本
+  （`ERR_PNPM_IGNORED_BUILDS`），`dsh plugin add` 会直接失败。
+  本仓库把它放在 `peerDependencies` + `peerDependenciesMeta.optional`，需要的人自己装、
+  并把 `driver` 设为 `better-sqlite3`。
+- 构建时 `better-sqlite3` 必须保持 external（不打包）：它是 `.node` 二进制，内联进 bundle 必然加载失败。
+
+</details>
 
 ### 本地验证「别人装得上」
 
@@ -587,8 +596,8 @@ git push
 
 ```powershell
 npm pack                                     # 生成 ai-persistent-memory-<version>.tgz
-dsh plugin --profile <测试profile> add .\ai-persistent-memory-<version>.tgz
-dsh --profile <测试profile> --dump-config | Select-String 'ai-persistent-memory'
+dsh plugin --profile test add .\ai-persistent-memory-<version>.tgz
+dsh --profile test --dump-config | Select-String 'ai-persistent-memory'
 ```
 
 ## 构建与自检
@@ -617,27 +626,13 @@ node -e "const m=require('./lib/index.js'); console.log(m.name, typeof m.apply, 
 node lib/cli/cli.js stats --path "D:\AI_Memory"
 ```
 
-`better-sqlite3` 必须保持 **external**（不打包）：它是 `.node` 二进制，内联进 bundle 必然加载失败。
-构建产物里应当只有一处懒加载的 `require("better-sqlite3")`。
+<details>
+<summary>构建配置的两个注意点</summary>
 
-`tsup.config.ts` 把源码里的 `import.meta.url` 用 `define` 换成由 banner 定义的常量（CJS 产物没有 `import.meta`），
-并把 `charset` 设为 `utf8`，保留中文原文便于发布后直接 grep 提示词。
+- `tsup.config.ts` 把源码里的 `import.meta.url` 用 `define` 换成由 banner 定义的常量（CJS 产物没有 `import.meta`）；
+- `charset` 设为 `utf8`，保留中文原文，便于发布后直接 grep 提示词。
 
-## 已知限制
-
-- **没有测试**：本仓库当前不附带测试文件。`npm run test` 已配置为 `node --test`，但跑起来不会执行任何用例。
-  引擎的行为约束（半衰期边界、防重阈值、预算装配等）需要你自己补测试。
-- **没有 embedding 适配器**：`TextEmbedder` 只是接口。要走向量检索，需要自己实现 `embed()` 并
-  通过 `new MemoryEngine({ embedder })` 注入；`embedding.enabled` 目前只影响配置校验。
-- **互链没有写入方**：`memory_links` 只能读不能写，所以「互链扩散」实际不会触发；
-  需要建链的话要自己补 `MemoryRepository` 的写入方法。
-- **`sealed` / `archived` 没有切换入口**：状态与 SQL 约束齐备，但引擎没有对应方法。
-- **WorldContextBuilder 未接入默认注入**：见上文「编程接入」。
-- **`daily_digest` / `weekly_story` 默认跳过**：需要宿主提供 LLM 处理器。
-- **没有 doctor / 修复命令**：schema 不匹配时会直接拒绝启动，需要手工备份 `memory.db` 后重命名再初始化。
-- **Windows 优先**：路径校验、选盘、`install.ps1` 都是按 Windows 写的；POSIX 路径只做语法归一。
-- **依赖宿主版本**：`systemPrompt.section` 的 `order`、`session/event` 事件名、`webServer.register`
-  的形状都按当前 DSH 的契约写，宿主升级后需要重新验证。
+</details>
 
 ## 目录结构
 
@@ -661,4 +656,6 @@ locale/{zh,en}.json 插件元信息
 
 ## License
 
-MIT · 作者：**一株紫罗兰**
+MIT © 一株紫罗兰
+
+完整条款见 [LICENSE](./LICENSE)。
