@@ -1,0 +1,75 @@
+{
+  "name": "ai-persistent-memory",
+  "version": "0.6.1",
+  "description": "100% 本地、可遗忘的长效记忆插件：写入 / 双份存储 / 检索注入 / 五级生命周期",
+  "license": "MIT",
+  "private": false,
+  "type": "commonjs",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./adapters/agent/DshAdapter": "./lib/adapters/agent/DshAdapter.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./cli": "./lib/cli/cli.js",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "bin": {
+    "ai-memory": "./lib/cli/cli.js"
+  },
+  "files": [
+    "lib",
+    "patches",
+    "locale",
+    "client.js",
+    "icon.svg",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "patches/bundle.yaml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "cli": "node lib/cli/cli.js",
+    "init": "node lib/cli/cli.js init",
+    "stats": "node lib/cli/cli.js stats"
+  },
+  "keywords": [
+    "ai",
+    "memory",
+    "agent",
+    "sqlite",
+    "markdown",
+    "deepseek",
+    "persistent-memory",
+    "forgetting-curve",
+    "dsh-plugin"
+  ],
+  "peerDependencies": {
+    "better-sqlite3": "^12.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0",
+    "tsup": "^9.0.0",
+    "typescript": "^5.7.0"
+  }
+}

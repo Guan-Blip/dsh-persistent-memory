@@ -1,0 +1,31 @@
+# DSH bundle patch layer —— 由 package.json 的 dsh.bundle.patch 指向本文件。
+#
+# 顶层必须是「patch 条目」YAML 数组（Cordis loader patch dialect）。
+# 本插件没有任何前端 UI，因此这里只有一条 insert：
+# 把插件本体作为一行 Cordis 插件挂进 profile 的 entry 列表。
+#
+# ⚠️ 注意：这里不能写 `[]`。
+#   `[]` 在语法上合法，但含义是「本 bundle 不贡献任何插件行」——安装后
+#   插件管理器里能看到这个包，插件却根本不会启动（不注册工具、不拦对话）。
+#   DSH 官方模板（skills/cordis-plugin-development/references/host-plugin.md）
+#   与自带 bundle（dsh-experimental-ralph-bundle 等）都要求写 insert 行。
+#
+# config 会原样传给插件导出的 apply(ctx, config)。
+- insert:
+    - id: ai-persistent-memory
+      name: 'ai-persistent-memory'
+      config:
+        # 硬约束：记忆库只能落在非系统盘。C: 或任意层级含 AppData 的路径
+        # 会被引擎的 SystemDriveError 直接拒绝启动（不会静默改路径）。
+        memoryDbPath: 'D:\AI_Memory'
+        # auto：优先进程内置的 node:sqlite（Electron/Node 24，免原生重编译），
+        # 不可用时回落到 better-sqlite3。
+        driver: auto
+        budgetTokens: 1200
+        topK: 8
+        # 轮次结束后用 LLM 抽取五层结构记忆（需要 DEEPSEEK_API_KEY）。
+        extract: true
+        # 没有 API Key 时，退化为把整轮原文存成一条 event 记忆（仍受 6h 防重约束）。
+        rawFallback: true
+        # 常驻进程内启动遗忘调度器（00:00 复习 + 冷存扫描等）。
+        maintenance: true

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "AI 长期记忆",
+    "description": "100% 本地的长效记忆：SQLite + Markdown 双写、五层抽取、检索注入、五级遗忘。所有数据只留在 D:\\AI_Memory。"
+  }
+}

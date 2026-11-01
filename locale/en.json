@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "AI Persistent Memory",
+    "description": "100% local long-term memory: SQLite + Markdown double-write, five-layer extraction, recall injection, five-stage forgetting. All data stays in D:\\AI_Memory."
+  }
+}
