@@ -165,10 +165,13 @@ score        = semantic × 衰减权重 × 情绪系数
 
 ## 安装
 
+> [!WARNING]
+> **⚠️ 安装前必读（Beta 测试版）**
+> 本项目目前处于 Beta 阶段，虽然自带快照兜底，但**强烈建议在安装和使用前，先备份你 DSH 原有的重要数据**。遇到未知 Bug 欢迎随时提 Issue。
+
 ### 方式一：DSH 插件（推荐给普通用户）
 
 ```bash
-
 #  GitHub 仓库
 dsh plugin --profile desktop add "github:Guan-Blip/dsh-persistent-memory"
 ```
