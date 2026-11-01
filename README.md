@@ -186,15 +186,12 @@ dsh plugin --profile desktop add "github:Guan-Blip/dsh-persistent-memory"
 .\install.ps1 -Source "github:Guan-Blip/dsh-persistent-memory"
 ```
 
-### 方式二：作为库 import
+### 方式二：本地开发挂载（适合修改源码）
+
+如果你把仓库 clone 到了本地，想修改代码并实时测试，可以直接用 `link:` 方式挂载：
 
 ```bash
-npm install ai-persistent-memory
-```
-
-```ts
-import { MemoryEngine, DshAdapter, MemoryExtractor, DeepSeekClient } from 'ai-persistent-memory';
-```
+dsh plugin --profile desktop add "link:你的本地绝对路径\dsh-persistent-memory"
 
 ## CLI
 
